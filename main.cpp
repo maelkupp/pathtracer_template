@@ -2,6 +2,7 @@
 #include <vector>
 #include <cmath>
 #include <random>
+#include <iostream>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -90,6 +91,42 @@ public:
 	// and the unit normal N
 	bool intersect(const Ray& ray, Vector& P, double &t, Vector& N) const {
 		 // TODO (lab 1) : compute the intersection (just true/false at the begining of lab 1, then P, t and N as well)
+		 double delta = dot(ray.u, ray.O - this->C)*dot(ray.u, ray.O - this->C) - ((ray.O - this->C).norm2() - this->R*this->R);
+		 double t_left = dot(ray.u, this->C - ray.O);
+
+		 if(delta < 0){
+			//we have no solutions to the equation
+			return false;
+		 }
+
+		 double delta_square_root = sqrt(delta); //square root the delta
+
+
+		 if(t_left < 0){
+			//the only way it can intersect is if t_left + sqrt(delta) is positive
+			if(t_left + delta_square_root >= 0){
+				t = t_left + delta_square_root; // update our t
+				P = ray.O + t*ray.u; //compute P from the equation
+				N = (P-this->C);
+				N.normalize();
+				return true;
+			}
+		 }else{
+			//we first check if t_left - delta_square_root is positive as that would be the first point of intersection
+			if(t_left - delta_square_root > 0){
+				t = t_left - delta_square_root;
+				P = ray.O + t*ray.u;
+				N = (P-C);
+				N.normalize();
+				return true;
+			}else if(t_left + delta_square_root > 0){
+				t = t_left + delta_square_root;
+				P = ray.O + t*ray.u;
+				N = (P-C);
+				N.normalize();
+				return true;	
+			}
+		 }
 		return false;
 	}
 
@@ -127,7 +164,35 @@ public:
 		// TODO (lab 1): iterate through the objects and check the intersections with all of them, 
 		// and keep the closest intersection, i.e., the one if smallest positive value of t
 
-		return false;
+		double t_min = std::numeric_limits<double>::max();
+		double t_temp {0.0}; //this is the t that we pass as a parameter
+		Vector P_best; //this is the P we will store
+		Vector P_temp; //initialise the temp
+		Vector N_best;
+		Vector N_temp;
+		int counter {0};
+		int min_counter = 0;
+
+		bool flag = false;
+		for(int i=0; i<static_cast<int>(objects.size()); ++i){
+			//iterating over the objects
+			bool is_intersect = objects[i]->intersect(ray, P_temp, t_temp, N_temp);
+			if(is_intersect && t_temp < t_min){
+				flag = true;
+				t_min = t_temp;
+				P_best = P_temp;
+				N_best = N_temp;
+				min_counter = i;
+			}
+
+		}
+
+		//give the values back to the references that we computed
+		t = t_min;
+		P = P_best;
+		N = N_best;
+		object_id = min_counter;
+		return flag;
 	}
 
 
@@ -145,7 +210,9 @@ public:
 		if (intersect(ray, P, t, N, object_id)) {
 
 			if (objects[object_id]->mirror) {
-
+				//compute the ray that goes off the mirror
+				Ray r = Ray(P, ray.u - 2*dot(ray.u, N)*N);
+				return this->getColor(r, recursion_depth+1);
 				// return getColor in the reflected direction, with recursion_depth+1 (recursively)
 			} // else
 
@@ -156,6 +223,29 @@ public:
 
 			// test if there is a shadow by sending a new ray
 			// if there is no shadow, compute the formula with dot products etc.
+			double eps = 1e-3; // a small epsilon
+			Vector new_P = P + eps*N; //shift the point upwards
+			Vector to_light_source_vector = this->light_position - new_P;
+			to_light_source_vector.normalize();
+
+			Vector P_intersect;
+			double t_intersect;
+			Vector N_intersect;
+			if(this->intersect(Ray(new_P, to_light_source_vector), P_intersect, t_intersect, N_intersect, object_id)){
+				//have found an intersection
+				//check if the distance from this intersection point is smaller than the distance to the light source
+				if((new_P - P_intersect).norm2() > (this->light_position - new_P).norm2()){
+					//there is no shadow so return the colour
+
+					double attenuation = this->light_intensity/(4*M_PI*(this->light_position - P).norm2());
+					Vector material = objects[object_id]->albedo/M_PI;
+					double angle = std::max(0.0, dot(N, (this->light_position - P)/((this->light_position-P).norm())));
+					Vector colour = attenuation*material*angle;
+					std::cout << colour.data[0] << colour.data[1] << colour.data[2] << "\n";
+					return colour;
+				}
+			}
+
 
 
 			// TODO (lab 2) : add indirect lighting component with a recursive call
@@ -191,7 +281,7 @@ int main() {
 	Sphere floor(Vector(0, -1000, 0), 990, Vector(0.6, 0.5, 0.7));
 
 	Scene scene;
-	scene.camera_center = Vector(0, 0, 0);
+	scene.camera_center = Vector(0, 0, 55);
 	scene.light_position = Vector(-10,20,40);
 	scene.light_intensity = 3E7;
 	scene.fov = 60 * M_PI / 180.;
@@ -200,14 +290,14 @@ int main() {
 
 	scene.addObject(&center_sphere);
 
-	/*
+	
 	scene.addObject(&wall_left);
 	scene.addObject(&wall_right);
 	scene.addObject(&wall_front);
 	scene.addObject(&wall_behind);
 	scene.addObject(&ceiling);
 	scene.addObject(&floor);
-	*/
+	
 
 	std::vector<unsigned char> image(W * H * 3, 0);
 
@@ -217,7 +307,8 @@ int main() {
 			Vector color;
 
 			// TODO (lab 1) : correct ray_direction so that it goes through each pixel (j, i)			
-			Vector ray_direction(0., 0., -1);
+			Vector ray_direction(j - W/2 + 0.5, H/2 - i -0.5, -W/(2*tan(scene.fov/2)));
+			ray_direction.normalize();
 
 			Ray ray(scene.camera_center, ray_direction);
 
