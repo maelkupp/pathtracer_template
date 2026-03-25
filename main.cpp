@@ -12,7 +12,7 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323856
 #endif
-
+ 
 static std::default_random_engine engine[32];
 static std::uniform_real_distribution<double> uniform(0, 1);
 
