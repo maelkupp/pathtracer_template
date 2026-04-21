@@ -208,48 +208,96 @@ public:
 		double t;
 		int object_id;
 		if (intersect(ray, P, t, N, object_id)) {
+			double eps = 1e-3; // a small epsilon
 
 			if (objects[object_id]->mirror) {
 				//compute the ray that goes off the mirror
-				Ray r = Ray(P, ray.u - 2*dot(ray.u, N)*N);
+				Ray r = Ray(P + eps*N, ray.u - 2*dot(ray.u, N)*N);
 				return this->getColor(r, recursion_depth+1);
 				// return getColor in the reflected direction, with recursion_depth+1 (recursively)
 			} // else
 
 			if (objects[object_id]->transparent) { // optional
+				double n1, n2;
+				if(dot(ray.u, N) > 0){
+					n1 = 1.5;
+					n2 = 1.0;
+					N = -1.0 * N;
+				}else{ //make sure to swap the mediums if <ray.u, N> > 0
+					n1 = 1.0;
+					n2 = 1.5;
+				}
+
+				double t_N = 1 - (n1/n2)*(n1/n2)*(1 - dot(ray.u, N)*dot(ray.u, N));
+				if(t_N < 0){
+					//total reflection, behaves like a mirror
+					Ray r = Ray(P + eps*N, ray.u - 2*dot(ray.u, N)*N);
+					return this->getColor(r, recursion_depth +1);
+				}
+				t_N = -sqrt(t_N); // square root a positive value
+				Vector T = (n1/n2)*(ray.u - dot(ray.u, N)*N);
+				Vector refraction_dir = t_N*N + T;
+				return this->getColor(Ray(P - eps*N, refraction_dir), recursion_depth+1);
 
 				// return getColor in the refraction direction, with recursion_depth+1 (recursively)
 			} // else
 
 			// test if there is a shadow by sending a new ray
 			// if there is no shadow, compute the formula with dot products etc.
-			double eps = 1e-3; // a small epsilon
 			Vector new_P = P + eps*N; //shift the point upwards
 			Vector to_light_source_vector = this->light_position - new_P;
 			to_light_source_vector.normalize();
 
+			Vector ret_colour;
 			Vector P_intersect;
 			double t_intersect;
 			Vector N_intersect;
-			if(this->intersect(Ray(new_P, to_light_source_vector), P_intersect, t_intersect, N_intersect, object_id)){
+			int n_object_id;
+			if(this->intersect(Ray(new_P, to_light_source_vector), P_intersect, t_intersect, N_intersect, n_object_id)){
 				//have found an intersection
 				//check if the distance from this intersection point is smaller than the distance to the light source
-				if((new_P - P_intersect).norm2() > (this->light_position - new_P).norm2()){
+				if((new_P - P_intersect).norm2() > (new_P - this->light_position).norm2()){
 					//there is no shadow so return the colour
 
 					double attenuation = this->light_intensity/(4*M_PI*(this->light_position - P).norm2());
 					Vector material = objects[object_id]->albedo/M_PI;
 					double angle = std::max(0.0, dot(N, (this->light_position - P)/((this->light_position-P).norm())));
 					Vector colour = attenuation*material*angle;
-					std::cout << colour.data[0] << colour.data[1] << colour.data[2] << "\n";
-					return colour;
+					ret_colour = colour;
 				}
+				// TODO (lab 2) : add indirect lighting component with a recursive call
+				double r1 = uniform(engine[0]);
+				double r2 = uniform(engine[0]);
+				double x = cos(2*M_PI*r1)*sqrt(1-r2); 
+				double y = sin(2*M_PI*r1)*sqrt(1-r2);
+				double z = sqrt(r2);
+				double abs_min = std::min(std::min(N.data[0], N.data[1]), std::min(N.data[1], N.data[2]));
+
+				Vector T1;
+				if(abs_min == abs(N.data[0])){
+					T1 = Vector(0, N.data[2], -N.data[1]);
+
+				}else if(abs_min == abs(N.data[1])){
+					T1 = Vector(-N.data[2], 0, N.data[0]);
+				}else{
+					T1 = Vector(-N.data[1], N.data[0], 0);
+				}
+
+				T1.normalize();
+				Vector T2 = cross(T1, N);
+				Vector random_direction = x*T1 + y*T2 + z*N;
+				random_direction.normalize();
+				
+				Ray random_ray = Ray(P + eps*N, random_direction);
+				ret_colour = ret_colour + objects[object_id]->albedo * this->getColor(random_ray, recursion_depth+1);
+				return ret_colour;
+
 			}
 
 
 
-			
-			// TODO (lab 2) : add indirect lighting component with a recursive call
+
+
 		}
 
 		
@@ -286,7 +334,7 @@ int main() {
 	scene.light_position = Vector(-10,20,40);
 	scene.light_intensity = 3E7;
 	scene.fov = 60 * M_PI / 180.;
-	scene.gamma = 1.0;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
+	scene.gamma = 2.2;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
 	scene.max_light_bounce = 5;
 
 	scene.addObject(&center_sphere);
@@ -306,22 +354,34 @@ int main() {
 	for (int i = 0; i < H; i++) {
 		for (int j = 0; j < W; j++) {
 			Vector color;
+			// TODO (lab 1) : correct ray_direction so that it goes through each pixel (j, i)
+			// Vector ray_direction(j - W/2 + 0.5, H/2 - i -0.5, -W/(2*tan(scene.fov/2)));
+			// ray_direction.normalize();
 
-			// TODO (lab 1) : correct ray_direction so that it goes through each pixel (j, i)			
-			Vector ray_direction(j - W/2 + 0.5, H/2 - i -0.5, -W/(2*tan(scene.fov/2)));
-			ray_direction.normalize();
-
-			Ray ray(scene.camera_center, ray_direction);
-
+			// Ray ray(scene.camera_center, ray_direction);
+			
 			// TODO (lab 2) : add Monte Carlo / averaging of random ray contributions here
 			// TODO (lab 2) : add antialiasing by altering the ray_direction here
 			// TODO (lab 2) : add depth of field effect by altering the ray origin (and direction) here
 
-			color  = scene.getColor(ray, 0);
+			size_t N = 5;
+			double sigma = 0.5; // tweak this
+			Vector colour_sum(0,0,0);
+			for(size_t k=0; k<N; ++k){
+				double r1 = uniform(engine[0]);
+				double r2 = uniform(engine[0]);
+				double dx = sqrt(-2*log(r1)) * cos(2*M_PI*r2);
+				double dy = sqrt(-2*log(r1)) * sin(2*M_PI*r2);
+				Vector ray_dir(j - W/2 + 0.5 + sigma*dx, H/2 -i -0.5 + sigma*dy, -W/(2*tan(scene.fov/2)));
+				ray_dir.normalize();
+				Ray new_ray(scene.camera_center, ray_dir);
+				colour_sum = colour_sum + scene.getColor(new_ray, 0);
+			}
+			colour_sum = colour_sum/N;
 
-			image[(i * W + j) * 3 + 0] = std::min(255., std::max(0., 255. * std::pow(color[0] / 255., 1. / scene.gamma)));
-			image[(i * W + j) * 3 + 1] = std::min(255., std::max(0., 255. * std::pow(color[1] / 255., 1. / scene.gamma)));
-			image[(i * W + j) * 3 + 2] = std::min(255., std::max(0., 255. * std::pow(color[2] / 255., 1. / scene.gamma)));
+			image[(i * W + j) * 3 + 0] = std::min(255., std::max(0., 255. * std::pow(colour_sum[0] / 255., 1. / scene.gamma)));
+			image[(i * W + j) * 3 + 1] = std::min(255., std::max(0., 255. * std::pow(colour_sum[1] / 255., 1. / scene.gamma)));
+			image[(i * W + j) * 3 + 2] = std::min(255., std::max(0., 255. * std::pow(colour_sum[2] / 255., 1. / scene.gamma)));
 		}
 	}
 	stbi_write_png("image.png", W, H, 3, &image[0], 0);
