@@ -248,6 +248,7 @@ public:
 
 
 
+			
 			// TODO (lab 2) : add indirect lighting component with a recursive call
 		}
 
