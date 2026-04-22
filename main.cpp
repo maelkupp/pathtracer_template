@@ -3,6 +3,10 @@
 #include <cmath>
 #include <random>
 #include <iostream>
+#include <map>
+#include <string>
+#include <fstream>
+
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -54,6 +58,9 @@ Vector operator*(const double a, const Vector& b) {
 }
 Vector operator*(const Vector& a, const double b) {
 	return Vector(a[0]*b, a[1]*b, a[2]*b);
+}
+Vector operator*(const Vector& a, const Vector& b){
+	return Vector(a[0]*b[0], a[1]*b[1], a[2]*b[2]);
 }
 Vector operator/(const Vector& a, const double b) {
 	return Vector(a[0] / b, a[1] / b, a[2] / b);
@@ -135,15 +142,222 @@ public:
 };
 
 
-// I will provide you with an obj mesh loader (labs 3 and 4)
+// Class only used in labs 3 and 4 
+class TriangleIndices {
+public:
+	TriangleIndices(int vtxi = -1, int vtxj = -1, int vtxk = -1, int ni = -1, int nj = -1, int nk = -1, int uvi = -1, int uvj = -1, int uvk = -1, int group = -1) {
+		vtx[0] = vtxi; vtx[1] = vtxj; vtx[2] = vtxk;
+		uv[0] = uvi; uv[1] = uvj; uv[2] = uvk;
+		n[0] = ni; n[1] = nj; n[2] = nk;
+		this->group = group;
+	};
+	int vtx[3]; // indices within the vertex coordinates array
+	int uv[3];  // indices within the uv coordinates array
+	int n[3];   // indices within the normals array
+	int group;  // face group
+};
+
+// Class only used in labs 3 and 4 
 class TriangleMesh : public Object {
 public:
 	TriangleMesh(const Vector& albedo, bool mirror = false, bool transparent = false) : ::Object(albedo, mirror, transparent) {};
 
-	bool intersect(const Ray& ray, Vector& P, double& t, Vector& N) const {
-		// TODO (labs 3 and 4)
-		return false;
+	// first scale and then translate the current object
+	void scale_translate(double s, const Vector& t) {
+		for (int i = 0; i < vertices.size(); i++) {
+			vertices[i] = vertices[i] * s + t;
+		}
 	}
+
+	// read an .obj file
+	void readOBJ(const char* obj) {
+		std::ifstream f(obj);
+		if (!f) return;
+
+		std::map<std::string, int> mtls;
+		int curGroup = -1, maxGroup = -1;
+
+		// OBJ indices are 1-based and can be negative (relative), this normalizes them
+		auto resolveIdx = [](int i, int size) {
+			return i < 0 ? size + i : i - 1;
+		};
+
+		auto setFaceVerts = [&](TriangleIndices& t, int i0, int i1, int i2) {
+			t.vtx[0] = resolveIdx(i0, vertices.size());
+			t.vtx[1] = resolveIdx(i1, vertices.size());
+			t.vtx[2] = resolveIdx(i2, vertices.size());
+		};
+		auto setFaceUVs = [&](TriangleIndices& t, int j0, int j1, int j2) {
+			t.uv[0] = resolveIdx(j0, uvs.size());
+			t.uv[1] = resolveIdx(j1, uvs.size());
+			t.uv[2] = resolveIdx(j2, uvs.size());
+		};
+		auto setFaceNormals = [&](TriangleIndices& t, int k0, int k1, int k2) {
+			t.n[0] = resolveIdx(k0, normals.size());
+			t.n[1] = resolveIdx(k1, normals.size());
+			t.n[2] = resolveIdx(k2, normals.size());
+		};
+
+		std::string line;
+		while (std::getline(f, line)) {
+			// Trim trailing whitespace
+			line.erase(line.find_last_not_of(" \r\t\n") + 1);
+			if (line.empty()) continue;
+
+			const char* s = line.c_str();
+
+			if (line.rfind("usemtl ", 0) == 0) {
+				std::string matname = line.substr(7);
+				auto result = mtls.emplace(matname, maxGroup + 1);
+				if (result.second) {
+					curGroup = ++maxGroup;
+				} else {
+					curGroup = result.first->second;
+				}
+			} else if (line.rfind("vn ", 0) == 0) {
+				Vector v;
+				sscanf(s, "vn %lf %lf %lf", &v[0], &v[1], &v[2]);
+				normals.push_back(v);
+			} else if (line.rfind("vt ", 0) == 0) {
+				Vector v;
+				sscanf(s, "vt %lf %lf", &v[0], &v[1]);
+				uvs.push_back(v);
+			} else if (line.rfind("v ", 0) == 0) {
+				Vector pos, col;
+				if (sscanf(s, "v %lf %lf %lf %lf %lf %lf", &pos[0], &pos[1], &pos[2], &col[0], &col[1], &col[2]) == 6) {
+					for (int i = 0; i < 3; i++) col[i] = std::min(1.0, std::max(0.0, col[i]));
+					vertexcolors.push_back(col);
+				} else {
+					sscanf(s, "v %lf %lf %lf", &pos[0], &pos[1], &pos[2]);
+				}
+				vertices.push_back(pos);
+			}
+			else if (line[0] == 'f') {
+				int i[4], j[4], k[4], offset, nn;
+				const char* cur = s + 1;
+				TriangleIndices t;
+				t.group = curGroup;
+
+				// Try each face format: v/vt/vn, v/vt, v//vn, v
+				if ((nn = sscanf(cur, "%d/%d/%d %d/%d/%d %d/%d/%d%n", &i[0], &j[0], &k[0], &i[1], &j[1], &k[1], &i[2], &j[2], &k[2], &offset)) == 9) {
+					setFaceVerts(t, i[0], i[1], i[2]); 
+					setFaceUVs(t, j[0], j[1], j[2]); 
+					setFaceNormals(t, k[0], k[1], k[2]);
+				} else if ((nn = sscanf(cur, "%d/%d %d/%d %d/%d%n", &i[0], &j[0], &i[1], &j[1], &i[2], &j[2], &offset)) == 6) {
+					setFaceVerts(t, i[0], i[1], i[2]); 
+					setFaceUVs(t, j[0], j[1], j[2]);
+				} else if ((nn = sscanf(cur, "%d//%d %d//%d %d//%d%n", &i[0], &k[0], &i[1], &k[1], &i[2], &k[2], &offset)) == 6) {
+					setFaceVerts(t, i[0], i[1], i[2]); 
+					setFaceNormals(t, k[0], k[1], k[2]);
+				} else if ((nn = sscanf(cur, "%d %d %d%n", &i[0], &i[1], &i[2], &offset)) == 3) {
+					setFaceVerts(t, i[0], i[1], i[2]);
+				}
+				else continue;
+
+				indices.push_back(t);
+				cur += offset;
+
+				// Fan triangulation for polygon faces (4+ vertices)
+				while (*cur && *cur != '\n') {
+					TriangleIndices t2;
+					t2.group = curGroup;
+					if ((nn = sscanf(cur, " %d/%d/%d%n", &i[3], &j[3], &k[3], &offset)) == 3) {
+						setFaceVerts(t2, i[0], i[2], i[3]); 
+						setFaceUVs(t2, j[0], j[2], j[3]); 
+						setFaceNormals(t2, k[0], k[2], k[3]);
+					} else if ((nn = sscanf(cur, " %d/%d%n", &i[3], &j[3], &offset)) == 2) {
+						setFaceVerts(t2, i[0], i[2], i[3]); 
+						setFaceUVs(t2, j[0], j[2], j[3]);
+					} else if ((nn = sscanf(cur, " %d//%d%n", &i[3], &k[3], &offset)) == 2) {
+						setFaceVerts(t2, i[0], i[2], i[3]); 
+						setFaceNormals(t2, k[0], k[2], k[3]);
+					} else if ((nn = sscanf(cur, " %d%n", &i[3], &offset)) == 1) {
+						setFaceVerts(t2, i[0], i[2], i[3]);
+					} else { 
+						cur++; 
+						continue; 
+					}
+
+					indices.push_back(t2);
+					cur += offset;
+					i[2] = i[3]; j[2] = j[3]; k[2] = k[3];
+				}
+			}
+		}
+	}
+	
+
+	// TODO ray-mesh intersection (labs 3 and 4)
+	bool intersect(const Ray& ray, Vector& P, double& t, Vector& N) const {
+		
+		// lab 3 : for each triangle, compute the ray-triangle intersection with Moller-Trumbore algorithm
+		// lab 3 : once done, speed it up by first checking against the mesh bounding box
+		Vector B_min(std::numeric_limits<double>::max(), std::numeric_limits<double>::max(), std::numeric_limits<double>::max());
+		Vector B_max(std::numeric_limits<double>::min(), std::numeric_limits<double>::min(), std::numeric_limits<double>::min());
+		for(const auto& vertex: vertices){
+			//computing the min
+			if(vertex[0] < B_min[0]) B_min[0] = vertex[0];
+			if(vertex[1] < B_min[0]) B_min[1] = vertex[1];
+			if(vertex[2] < B_min[0]) B_min[2] = vertex[2];
+			//computing the max
+			if(vertex[0] > B_max[0]) B_max[0] = vertex[0];
+			if(vertex[1] > B_max[1]) B_max[1] = vertex[1];
+			if(vertex[2] > B_max[2]) B_max[2] = vertex[2];
+		}
+
+		double t_x_min = (B_min[0] - ray.O[0])/ray.u[0];
+		double t_x_max = (B_max[0] - ray.O[0])/ray.u[0];
+
+		double t_y_min = (B_min[1] - ray.O[1])/ray.u[1];
+		double t_y_max = (B_max[1] - ray.O[1])/ray.u[1];
+
+		double t_z_min = (B_min[2] - ray.O[2])/ray.u[2];
+		double t_z_max = (B_max[2] - ray.O[2])/ray.u[2];
+
+		if(std::max(t_x_min, std::max(t_y_min, t_z_min)) >= std::min(t_x_max, std::min(t_y_max, t_z_max))){
+			return false;
+		}
+
+		double t_min = std::numeric_limits<double>::max();
+		double t_temp;
+		Vector N_best;
+		bool intersected = false;
+		for(const TriangleIndices& triangle: this->indices){
+			Vector A = vertices[triangle.vtx[0]];
+			Vector B = vertices[triangle.vtx[1]];
+			Vector C = vertices[triangle.vtx[2]];
+			Vector e1 = B - A;
+			Vector e2 = C - A;
+			Vector N_temp = cross(e1, e2);
+			double den = dot(ray.u, N_temp);
+			double beta_num = dot(e2, cross((A - ray.O), ray.u));
+			double gamma_num = -dot(e1, cross(A-ray.O, ray.u));
+			double beta = beta_num/den;
+			double gamma = gamma_num/den;
+			double alpha = 1 - beta - gamma;
+			//need to check that alpha is positive
+			t_temp = dot(A-ray.O, N)/dot(ray.u, N);
+			if(alpha >= 0 && gamma >= 0 && beta >= 0 && t_temp < t_min){
+				N_best = N_temp;
+				t_min = t_temp;
+			}
+		}
+
+		t = t_min;
+		P = ray.O + t_min*ray.u;
+		N_best.normalize(); //normalize before changing the referenced normal
+		N = N_best;
+
+		// lab 4 : recursively apply the bounding-box test from a BVH datastructure
+		return intersected;
+	}
+
+
+	std::vector<TriangleIndices> indices;
+	std::vector<Vector> vertices;
+	std::vector<Vector> normals;
+	std::vector<Vector> uvs;
+	std::vector<Vector> vertexcolors;
 };
 
 
@@ -295,13 +509,7 @@ public:
 
 			}
 
-
-
-
-
 		}
-
-		
 
 		return Vector(0, 0, 0);
 	}
@@ -322,7 +530,9 @@ int main() {
 		engine[i].seed(i);
 	}
 
-	Sphere center_sphere(Vector(0, 0, 0), 10., Vector(0.8, 0.8, 0.8));
+	Sphere center_sphere(Vector(0, 0, 5), 5., Vector(0.8, 0.8, 0.8), true, false);
+	Sphere left_sphere(Vector(-12, 0, 0), 5., Vector(0.6, 0.6, 0.8));
+	Sphere right_sphere(Vector(12,0,10), 5., Vector(0.8, 0.6, 0.4));
 	Sphere wall_left(Vector(-1000, 0, 0), 940, Vector(0.5, 0.8, 0.1));
 	Sphere wall_right(Vector(1000, 0, 0), 940, Vector(0.9, 0.2, 0.3));
 	Sphere wall_front(Vector(0, 0, -1000), 940, Vector(0.1, 0.6, 0.7));
@@ -331,6 +541,10 @@ int main() {
 	Sphere floor(Vector(0, -1000, 0), 990, Vector(0.6, 0.5, 0.7));
 
 	Scene scene;
+	TriangleMesh cat(Vector(0.6,0.6,0.6));
+	cat.readOBJ("./cat.obj");
+	Vector scale(0, -10, 0);
+	cat.scale_translate(0.6, scale);
 	scene.camera_center = Vector(0, 0, 55);
 	scene.light_position = Vector(-10,20,40);
 	scene.light_intensity = 3E7;
@@ -338,7 +552,9 @@ int main() {
 	scene.gamma = 2.2;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
 	scene.max_light_bounce = 5;
 
-	scene.addObject(&center_sphere);
+	// scene.addObject(&center_sphere);
+	// scene.addObject(&left_sphere);
+	// scene.addObject(&right_sphere);
 
 	
 	scene.addObject(&wall_left);
@@ -347,7 +563,7 @@ int main() {
 	scene.addObject(&wall_behind);
 	scene.addObject(&ceiling);
 	scene.addObject(&floor);
-	
+	scene.addObject(&cat);
 
 	std::vector<unsigned char> image(W * H * 3, 0);
 
