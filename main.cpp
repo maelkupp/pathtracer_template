@@ -2,7 +2,7 @@
 #include <vector>
 #include <cmath>
 #include <random>
-#include <iostream>
+#include <omp.h>
 #include <map>
 #include <string>
 #include <fstream>
@@ -157,11 +157,104 @@ public:
 	int group;  // face group
 };
 
+struct BVHNode {
+    Vector B_min, B_max;
+    int left, right;  // indices into bvh_nodes (-1 if leaf)
+    int start, end;   // range in indices[]
+};
+
 // Class only used in labs 3 and 4 
 class TriangleMesh : public Object {
 public:
 	TriangleMesh(const Vector& albedo, bool mirror = false, bool transparent = false) : ::Object(albedo, mirror, transparent) {};
+	
+	void find_bounds() {
+		B_min = Vector(std::numeric_limits<double>::max(),std::numeric_limits<double>::max(),std::numeric_limits<double>::max());
+		B_max = Vector(-std::numeric_limits<double>::max(),-std::numeric_limits<double>::max(),-std::numeric_limits<double>::max());
+		for (const auto& v : vertices) {
+			for (int i = 0; i < 3; i++) {
+				if (v[i] < B_min[i]) B_min[i] = v[i];
+				if (v[i] > B_max[i]) B_max[i] = v[i];
+			}
+		}
+	}
 
+	BVHNode compute_node_bounds(int start, int end) {
+		BVHNode node;
+		node.start = start;
+		node.end = end;
+		node.left = node.right = -1;
+		node.B_min = Vector( std::numeric_limits<double>::max(),
+							std::numeric_limits<double>::max(),
+							std::numeric_limits<double>::max());
+		node.B_max = Vector(-std::numeric_limits<double>::max(),
+							-std::numeric_limits<double>::max(),
+							-std::numeric_limits<double>::max());
+		for (int i = start; i < end; i++) {
+			for (int k = 0; k < 3; k++) {
+				const Vector& v = vertices[indices[i].vtx[k]];
+				for (int ax = 0; ax < 3; ax++) {
+					if (v[ax] < node.B_min[ax]) node.B_min[ax] = v[ax];
+					if (v[ax] > node.B_max[ax]) node.B_max[ax] = v[ax];
+				}
+			}
+		}
+		return node;
+	}
+
+	void build_bvh(int node_idx, int start, int end) {
+		bvh_nodes[node_idx] = compute_node_bounds(start, end);
+
+		// // we stop the recursion when not a lot of triangle are there
+		if(end - start <= 3){
+			return;
+		}
+
+		// split along the longest axis at the midpoint
+		Vector extent = bvh_nodes[node_idx].B_max - bvh_nodes[node_idx].B_min;
+		int axis = 0;
+
+		if (extent[1] > extent[axis]){
+			axis = 1;
+		}
+		if(extent[2] > extent[axis]){
+			axis = 2;
+		}
+		double mid = (bvh_nodes[node_idx].B_min[axis] + bvh_nodes[node_idx].B_max[axis])/2;
+
+		// partition triangles around the midpoint on chosen axis
+		int split = start;
+		for (int i = start; i < end; i++) {
+			// use centroid of triangle to decide which side it goes on
+			double centroid = (vertices[indices[i].vtx[0]][axis]
+							+ vertices[indices[i].vtx[1]][axis]
+							+ vertices[indices[i].vtx[2]][axis]) / 3.0;
+			if (centroid < mid) {
+				std::swap(indices[i], indices[split]);
+				split++;
+			}
+		}
+
+		//if it is a bad partion, if they are all on one side we split it in the middle
+		if(split == start || split == end){
+			split = (start + end)/2;
+		}
+
+		//allocate left and right children
+		int left_idx  = bvh_nodes.size(); bvh_nodes.push_back(BVHNode());
+		int right_idx = bvh_nodes.size(); bvh_nodes.push_back(BVHNode());
+		bvh_nodes[node_idx].left  = left_idx;
+		bvh_nodes[node_idx].right = right_idx;
+
+		build_bvh(left_idx,  start, split); //recurse on the left child
+		build_bvh(right_idx, split, end); //recurse on the right chid
+	}
+
+	void build_bvh() {
+		bvh_nodes.push_back(BVHNode()); // root is node 0
+		build_bvh(0, 0, indices.size()); //here we start the recursion
+	}
+	
 	// first scale and then translate the current object
 	void scale_translate(double s, const Vector& t) {
 		for (int i = 0; i < vertices.size(); i++) {
@@ -286,69 +379,148 @@ public:
 		}
 	}
 	
+	//helper function
+	bool ray_hits_box(const Vector& B_min, const Vector& B_max, const Ray& ray, double t_min) const {
+		//also pass the current t_min i was goig to check it later on anyways so i just did it here first too
+		double t_x0 = (B_min[0] - ray.O[0]) / ray.u[0];
+		double t_x1 = (B_max[0] - ray.O[0]) / ray.u[0];
+		double t_xmin = std::min(t_x0, t_x1);
+		double t_xmax = std::max(t_x0, t_x1);
 
-	// TODO ray-mesh intersection (labs 3 and 4)
-	bool intersect(const Ray& ray, Vector& P, double& t, Vector& N) const {
+		double t_y0 = (B_min[1] - ray.O[1]) / ray.u[1];
+		double t_y1 = (B_max[1] - ray.O[1]) / ray.u[1];
+		double t_ymin = std::min(t_y0, t_y1);
+		double t_ymax = std::max(t_y0, t_y1);
+
+		double t_z0 = (B_min[2] - ray.O[2]) / ray.u[2];
+		double t_z1 = (B_max[2] - ray.O[2]) / ray.u[2];
+		double t_zmin = std::min(t_z0, t_z1);
+		double t_zmax = std::max(t_z0, t_z1);
+
+		double t_enter = std::max(t_xmin, std::max(t_ymin, t_zmin));
+		double t_exit  = std::min(t_xmax, std::min(t_ymax, t_zmax));
+
+		return t_enter < t_exit && t_exit > 0 && t_enter < t_min;
+	}
+
+
+	//this was my code for lab 3 before we used the BVH nodes
+	// // TODO ray-mesh intersection (labs 3 and 4)
+	// bool intersect(const Ray& ray, Vector& P, double& t, Vector& N) const {
 		
-		// lab 3 : for each triangle, compute the ray-triangle intersection with Moller-Trumbore algorithm
-		// lab 3 : once done, speed it up by first checking against the mesh bounding box
-		Vector B_min(std::numeric_limits<double>::max(), std::numeric_limits<double>::max(), std::numeric_limits<double>::max());
-		Vector B_max(std::numeric_limits<double>::min(), std::numeric_limits<double>::min(), std::numeric_limits<double>::min());
-		for(const auto& vertex: vertices){
-			//computing the min
-			if(vertex[0] < B_min[0]) B_min[0] = vertex[0];
-			if(vertex[1] < B_min[0]) B_min[1] = vertex[1];
-			if(vertex[2] < B_min[0]) B_min[2] = vertex[2];
-			//computing the max
-			if(vertex[0] > B_max[0]) B_max[0] = vertex[0];
-			if(vertex[1] > B_max[1]) B_max[1] = vertex[1];
-			if(vertex[2] > B_max[2]) B_max[2] = vertex[2];
-		}
+	// 	// lab 3 : for each triangle, compute the ray-triangle intersection with Moller-Trumbore algorithm
+	// 	// lab 3 : once done, speed it up by first checking against the mesh bounding box
+	// 	double t_x0 = (B_min[0] - ray.O[0])/ray.u[0];
+	// 	double t_x1 = (B_max[0] - ray.O[0])/ray.u[0];
+	// 	double t_x_min = std::min(t_x0, t_x1);
+	// 	double t_x_max = std::max(t_x0, t_x1);
 
-		double t_x_min = (B_min[0] - ray.O[0])/ray.u[0];
-		double t_x_max = (B_max[0] - ray.O[0])/ray.u[0];
+	// 	double t_y0 = (B_min[1] - ray.O[1])/ray.u[1];
+	// 	double t_y1 = (B_max[1] - ray.O[1])/ray.u[1];
+	// 	double t_y_min = std::min(t_y0, t_y1);
+	// 	double t_y_max = std::max(t_y0, t_y1);
 
-		double t_y_min = (B_min[1] - ray.O[1])/ray.u[1];
-		double t_y_max = (B_max[1] - ray.O[1])/ray.u[1];
+	// 	double t_z0 = (B_min[2] - ray.O[2])/ray.u[2];
+	// 	double t_z1 = (B_max[2] - ray.O[2])/ray.u[2];
+	// 	double t_z_min = std::min(t_z0, t_z1);
+	// 	double t_z_max = std::max(t_z0, t_z1);
 
-		double t_z_min = (B_min[2] - ray.O[2])/ray.u[2];
-		double t_z_max = (B_max[2] - ray.O[2])/ray.u[2];
+	// 	if(std::max(t_x_min, std::max(t_y_min, t_z_min)) > std::min(t_x_max, std::min(t_y_max, t_z_max))){
+	// 		return false;
+	// 	}
 
-		if(std::max(t_x_min, std::max(t_y_min, t_z_min)) >= std::min(t_x_max, std::min(t_y_max, t_z_max))){
-			return false;
-		}
+	// 	double t_min = std::numeric_limits<double>::max();
+	// 	double t_temp;
+	// 	Vector N_best;
+	// 	bool intersected = false;
+	// 	for(const TriangleIndices& triangle: this->indices){
+	// 		Vector A = vertices[triangle.vtx[0]];
+	// 		Vector B = vertices[triangle.vtx[1]];
+	// 		Vector C = vertices[triangle.vtx[2]];
+	// 		Vector e1 = B - A;
+	// 		Vector e2 = C - A;
+	// 		Vector N_temp = cross(e1, e2);
+	// 		double den = dot(ray.u, N_temp);
+	// 		t_temp = dot(A-ray.O, N_temp)/den;
+	// 		if(t_temp > 0 && t_temp < t_min){
+	// 			double beta_num = dot(e2, cross((A - ray.O), ray.u));
+	// 			double gamma_num = -dot(e1, cross(A-ray.O, ray.u));
+	// 			double beta = beta_num/den;
+	// 			double gamma = gamma_num/den;
+	// 			double alpha = 1 - beta - gamma;
+	// 			//need to check that alpha is positive
+	// 			if(alpha >= 0 && gamma >= 0 && beta >= 0){
+	// 				N_best = N_temp;
+	// 				t_min = t_temp;
+	// 				intersected = true;
+	// 			}
+	// 		}
+	// 	}
 
+	// 	t = t_min;
+	// 	P = ray.O + t_min*ray.u;
+	// 	N_best.normalize(); //normalize before changing the referenced normal
+	// 	N = N_best;
+
+	// 	// lab 4 : recursively apply the bounding-box test from a BVH datastructure
+	// 	return intersected;
+	// }
+
+	bool intersect(const Ray& ray, Vector& P, double& t, Vector& N) const {
 		double t_min = std::numeric_limits<double>::max();
-		double t_temp;
 		Vector N_best;
 		bool intersected = false;
-		for(const TriangleIndices& triangle: this->indices){
-			Vector A = vertices[triangle.vtx[0]];
-			Vector B = vertices[triangle.vtx[1]];
-			Vector C = vertices[triangle.vtx[2]];
-			Vector e1 = B - A;
-			Vector e2 = C - A;
-			Vector N_temp = cross(e1, e2);
-			double den = dot(ray.u, N_temp);
-			double beta_num = dot(e2, cross((A - ray.O), ray.u));
-			double gamma_num = -dot(e1, cross(A-ray.O, ray.u));
-			double beta = beta_num/den;
-			double gamma = gamma_num/den;
-			double alpha = 1 - beta - gamma;
-			//need to check that alpha is positive
-			t_temp = dot(A-ray.O, N)/dot(ray.u, N);
-			if(alpha >= 0 && gamma >= 0 && beta >= 0 && t_temp < t_min){
-				N_best = N_temp;
-				t_min = t_temp;
+
+		// usig a stack to iterate over the BVH nodes
+		std::vector<int> stack;
+		stack.push_back(0); // start at root
+		
+
+		//ended up doing iteratively, i was getting stuck with bugs when doing it recursively
+		while (!stack.empty()) {
+			int node_idx = stack.back();
+			stack.pop_back();
+			const BVHNode& node = bvh_nodes[node_idx];
+
+			if (!ray_hits_box(node.B_min, node.B_max, ray, t_min)) continue; //call the helper function that checks if the ray hits the box
+
+			if (node.left == -1) {
+				// we reached a leaf node
+				for (int i = node.start; i < node.end; i++) {
+					const TriangleIndices& triangle = indices[i];
+					Vector A = vertices[triangle.vtx[0]];
+					Vector B = vertices[triangle.vtx[1]];
+					Vector C = vertices[triangle.vtx[2]];
+					Vector e1 = B - A;
+					Vector e2 = C - A;
+					Vector N_temp = cross(e1, e2);
+					double den = dot(ray.u, N_temp);
+					double t_temp = dot(A - ray.O, N_temp) / den;
+					if (t_temp > 0 && t_temp < t_min) {
+						double beta  =  dot(e2, cross(A - ray.O, ray.u)) / den;
+						double gamma = -dot(e1, cross(A - ray.O, ray.u)) / den;
+						double alpha = 1 - beta - gamma;
+						if (alpha >= 0 && beta >= 0 && gamma >= 0) {
+							N_best = alpha*normals[triangle.n[0]] + beta*normals[triangle.n[1]] + gamma*normals[triangle.n[2]];
+							N_best.normalize();
+							t_min = t_temp;
+							intersected = true;
+						}
+					}
+				}
+			} else {
+				//not a leaf node so it has children so we push them onto the stack
+				stack.push_back(node.left);
+				stack.push_back(node.right);
 			}
 		}
 
-		t = t_min;
-		P = ray.O + t_min*ray.u;
-		N_best.normalize(); //normalize before changing the referenced normal
-		N = N_best;
-
-		// lab 4 : recursively apply the bounding-box test from a BVH datastructure
+		if (intersected) {
+			t = t_min;
+			P = ray.O + t_min * ray.u;
+			N_best.normalize();
+			N = N_best;
+		}
 		return intersected;
 	}
 
@@ -358,6 +530,9 @@ public:
 	std::vector<Vector> normals;
 	std::vector<Vector> uvs;
 	std::vector<Vector> vertexcolors;
+	Vector B_min;
+	Vector B_max;
+	std::vector<BVHNode> bvh_nodes;
 };
 
 
@@ -411,105 +586,93 @@ public:
 	}
 
 
-	// return the radiance (color) along ray
 	Vector getColor(const Ray& ray, int recursion_depth) {
 
 		if (recursion_depth >= max_light_bounce) return Vector(0, 0, 0);
-
-		// TODO (lab 1) : if intersect with ray, use the returned information to compute the color ; otherwise black 
-		// in lab 1, the color only includes direct lighting with shadows
 
 		Vector P, N;
 		double t;
 		int object_id;
 		if (intersect(ray, P, t, N, object_id)) {
-			double eps = 1e-3; // a small epsilon
+			double eps = 1e-3;
 
 			if (objects[object_id]->mirror) {
-				//compute the ray that goes off the mirror
 				Ray r = Ray(P + eps*N, ray.u - 2*dot(ray.u, N)*N);
 				return this->getColor(r, recursion_depth+1);
-				// return getColor in the reflected direction, with recursion_depth+1 (recursively)
-			} // else
+			}
 
-			if (objects[object_id]->transparent) { // optional
+			if (objects[object_id]->transparent) {
 				double n1, n2;
 				if(dot(ray.u, N) > 0){
 					n1 = 1.5;
 					n2 = 1.0;
 					N = -1.0 * N;
-				}else{ //make sure to swap the mediums if <ray.u, N> > 0
+				}else{
 					n1 = 1.0;
 					n2 = 1.5;
 				}
-
 				double t_N = 1 - (n1/n2)*(n1/n2)*(1 - dot(ray.u, N)*dot(ray.u, N));
 				if(t_N < 0){
-					//total reflection, behaves like a mirror
 					Ray r = Ray(P + eps*N, ray.u - 2*dot(ray.u, N)*N);
-					return this->getColor(r, recursion_depth +1);
+					return this->getColor(r, recursion_depth+1);
 				}
-				t_N = -sqrt(t_N); // square root a positive value
+				t_N = -sqrt(t_N);
 				Vector T = (n1/n2)*(ray.u - dot(ray.u, N)*N);
 				Vector refraction_dir = t_N*N + T;
 				return this->getColor(Ray(P - eps*N, refraction_dir), recursion_depth+1);
+			}
 
-				// return getColor in the refraction direction, with recursion_depth+1 (recursively)
-			} // else
-
-			// test if there is a shadow by sending a new ray
-			// if there is no shadow, compute the formula with dot products etc.
-			Vector new_P = P + eps*N; //shift the point upwards
+			Vector new_P = P + eps*N;
 			Vector to_light_source_vector = this->light_position - new_P;
 			to_light_source_vector.normalize();
 
-			Vector ret_colour;
+			Vector ret_colour(0, 0, 0); //initialize to black 
+
 			Vector P_intersect;
 			double t_intersect;
 			Vector N_intersect;
 			int n_object_id;
 			if(this->intersect(Ray(new_P, to_light_source_vector), P_intersect, t_intersect, N_intersect, n_object_id)){
-				//have found an intersection
-				//check if the distance from this intersection point is smaller than the distance to the light source
 				if((new_P - P_intersect).norm2() > (new_P - this->light_position).norm2()){
-					//there is no shadow so return the colour
-
+					// not in shadow
 					double attenuation = this->light_intensity/(4*M_PI*(this->light_position - P).norm2());
 					Vector material = objects[object_id]->albedo/M_PI;
 					double angle = std::max(0.0, dot(N, (this->light_position - P)/((this->light_position-P).norm())));
-					Vector colour = attenuation*material*angle;
-					ret_colour = colour;
+					ret_colour = attenuation*material*angle;
 				}
-				// TODO (lab 2) : add indirect lighting component with a recursive call
-				double r1 = uniform(engine[0]);
-				double r2 = uniform(engine[0]);
-				double x = cos(2*M_PI*r1)*sqrt(1-r2); 
-				double y = sin(2*M_PI*r1)*sqrt(1-r2);
-				double z = sqrt(r2);
-				double abs_min = std::min(std::min(N.data[0], N.data[1]), std::min(N.data[1], N.data[2]));
-
-				Vector T1;
-				if(abs_min == abs(N.data[0])){
-					T1 = Vector(0, N.data[2], -N.data[1]);
-
-				}else if(abs_min == abs(N.data[1])){
-					T1 = Vector(-N.data[2], 0, N.data[0]);
-				}else{
-					T1 = Vector(-N.data[1], N.data[0], 0);
-				}
-
-				T1.normalize();
-				Vector T2 = cross(T1, N);
-				Vector random_direction = x*T1 + y*T2 + z*N;
-				random_direction.normalize();
-				
-				Ray random_ray = Ray(P + eps*N, random_direction);
-				ret_colour = ret_colour + objects[object_id]->albedo * this->getColor(random_ray, recursion_depth+1);
-				return ret_colour;
-
+			}else{
+				double attenuation = this->light_intensity/(4*M_PI*(this->light_position - P).norm2());
+				Vector material = objects[object_id]->albedo/M_PI;
+				double angle = std::max(0.0, dot(N, (this->light_position - P)/((this->light_position-P).norm())));
+				ret_colour = attenuation*material*angle;
 			}
 
-		} 
+			double abs_min = std::min(std::abs(N.data[0]), std::min(std::abs(N.data[1]), std::abs(N.data[2])));
+
+			double r1 = uniform(engine[0]);
+			double r2 = uniform(engine[0]);
+			double x = cos(2*M_PI*r1)*sqrt(1-r2);
+			double y = sin(2*M_PI*r1)*sqrt(1-r2);
+			double z = sqrt(r2);
+
+			Vector T1;
+			if(abs_min == std::abs(N.data[0])){
+				T1 = Vector(0, -N.data[2], N.data[1]);
+			}else if(abs_min == std::abs(N.data[1])){
+				T1 = Vector(-N.data[2], 0, N.data[0]);
+			}else{
+				T1 = Vector(-N.data[1], N.data[0], 0);
+			}
+
+			T1.normalize();
+			Vector T2 = cross(T1, N);
+			Vector random_direction = x*T1 + y*T2 + z*N;
+			random_direction.normalize();
+
+			Ray random_ray = Ray(P + eps*N, random_direction);
+			ret_colour = ret_colour + objects[object_id]->albedo * this->getColor(random_ray, recursion_depth+1);
+			return ret_colour;
+		}
 
 		return Vector(0, 0, 0);
 	}
@@ -530,9 +693,10 @@ int main() {
 		engine[i].seed(i);
 	}
 
-	Sphere center_sphere(Vector(0, 0, 5), 5., Vector(0.8, 0.8, 0.8), true, false);
-	Sphere left_sphere(Vector(-12, 0, 0), 5., Vector(0.6, 0.6, 0.8));
-	Sphere right_sphere(Vector(12,0,10), 5., Vector(0.8, 0.6, 0.4));
+	Sphere sphere_1(Vector(-14.5, 3, 0), 1.5, Vector(0.6, 0.2, 0.9));
+	Sphere sphere_2(Vector(-16, 0, 0), 1.5, Vector(0.6, 0.2, 0.9));
+	Sphere sphere_3(Vector(-17, -3, 0), 1.5, Vector(0.6, 0.2, 0.9), true);
+	Sphere sphere_4(Vector(-17.9, -6, -1), 1.5, Vector(0.6, 0.2, 0.9));
 	Sphere wall_left(Vector(-1000, 0, 0), 940, Vector(0.5, 0.8, 0.1));
 	Sphere wall_right(Vector(1000, 0, 0), 940, Vector(0.9, 0.2, 0.3));
 	Sphere wall_front(Vector(0, 0, -1000), 940, Vector(0.1, 0.6, 0.7));
@@ -541,19 +705,25 @@ int main() {
 	Sphere floor(Vector(0, -1000, 0), 990, Vector(0.6, 0.5, 0.7));
 
 	Scene scene;
-	TriangleMesh cat(Vector(0.6,0.6,0.6));
+	TriangleMesh cat(Vector(0.2,0.4,0.6));
 	cat.readOBJ("./cat.obj");
-	Vector scale(0, -10, 0);
+	Vector scale(5, -10, 0);
 	cat.scale_translate(0.6, scale);
+	cat.find_bounds();
+	cat.build_bvh();
 	scene.camera_center = Vector(0, 0, 55);
 	scene.light_position = Vector(-10,20,40);
-	scene.light_intensity = 3E7;
+	scene.light_intensity = 1.5E7;
 	scene.fov = 60 * M_PI / 180.;
 	scene.gamma = 2.2;    // TODO (lab 1) : play with gamma ; typically, gamma = 2.2
 	scene.max_light_bounce = 5;
 
 	// scene.addObject(&center_sphere);
-	// scene.addObject(&left_sphere);
+	scene.addObject(&sphere_1);
+	scene.addObject(&sphere_2);
+	scene.addObject(&sphere_3);
+	scene.addObject(&sphere_4);
+
 	// scene.addObject(&right_sphere);
 
 	
