@@ -509,7 +509,7 @@ public:
 
 			}
 
-		}
+		} 
 
 		return Vector(0, 0, 0);
 	}
